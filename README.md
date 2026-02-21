@@ -1,5 +1,10 @@
 # WeightedSemaphore
 
+[![CI](https://github.com/yoavgeva/weighted_semaphore/actions/workflows/ci.yml/badge.svg)](https://github.com/yoavgeva/weighted_semaphore/actions/workflows/ci.yml)
+[![Hex.pm](https://img.shields.io/hexpm/v/weighted_semaphore.svg)](https://hex.pm/packages/weighted_semaphore)
+[![Hex Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/weighted_semaphore)
+[![License: MIT](https://img.shields.io/badge/license-MIT-brightgreen.svg)](LICENSE)
+
 A weighted semaphore for Elixir — bound concurrent access to a shared resource where different operations can cost different amounts.
 
 Ported from Go's [`x/sync/semaphore`](https://pkg.go.dev/golang.org/x/sync/semaphore) with an Elixir-idiomatic API that auto-releases permits (no manual release, no leaks).
