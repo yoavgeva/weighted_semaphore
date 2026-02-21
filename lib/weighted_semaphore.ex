@@ -1,0 +1,232 @@
+defmodule WeightedSemaphore do
+  @moduledoc """
+  A weighted semaphore for bounding concurrent access to a shared resource.
+
+  Unlike a standard semaphore where each acquisition takes one permit,
+  a weighted semaphore allows each acquisition to specify a weight — the
+  number of permits it consumes. This is useful when different operations
+  have different costs (e.g., a bulk insert costs more than a single read).
+
+  Inspired by Go's [`x/sync/semaphore`](https://pkg.go.dev/golang.org/x/sync/semaphore),
+  with an Elixir-idiomatic API that auto-releases permits when the function
+  completes or crashes — eliminating permit leaks entirely.
+
+  ## Quick start
+
+      # 1. Add to your supervision tree
+      children = [
+        {WeightedSemaphore, name: MyApp.Sem, max: 10}
+      ]
+      Supervisor.start_link(children, strategy: :one_for_one)
+
+      # 2. Use it
+      {:ok, user} = WeightedSemaphore.acquire(MyApp.Sem, fn ->
+        Repo.get!(User, 123)
+      end)
+
+  ## How it works
+
+  When you call `acquire/2`, the semaphore checks if enough permits are
+  available. If so, it runs your function in a separate process and returns
+  the result. If not, your caller blocks (FIFO queue) until permits are freed.
+
+  When the function finishes — whether it returns normally, raises, exits,
+  or throws — permits are automatically released and the next queued caller
+  is woken up.
+
+  ## Fairness
+
+  Waiters are served in strict FIFO order. When a large waiter is at the
+  front of the queue but not enough permits are available, smaller waiters
+  behind it also block — even if they would fit. This prevents starvation
+  of large requests.
+
+  For example, with `max: 10` and 5 permits free: if a weight-8 request
+  is first in queue, a weight-1 request behind it will also wait, ensuring
+  the weight-8 request gets served once enough permits free up.
+
+  ## Return values
+
+  | Function | Success | No capacity | Timeout | fn crashes | Weight > max |
+  |---|---|---|---|---|---|
+  | `acquire/2,3` | `{:ok, result}` | blocks | — | `{:error, reason}` | `{:error, :weight_exceeds_max}` |
+  | `acquire/4` | `{:ok, result}` | blocks | `{:error, :timeout}` | `{:error, reason}` | `{:error, :weight_exceeds_max}` |
+  | `try_acquire/2,3` | `{:ok, result}` | `:rejected` | — | `{:error, reason}` | `{:error, :weight_exceeds_max}` |
+
+  ## Error handling
+
+  If the function raises, exits, or throws, the permits are still released
+  and the error is returned to the caller:
+
+      # raise → {:error, {%RuntimeError{}, stacktrace}}
+      {:error, {%RuntimeError{message: "boom"}, _}} =
+        WeightedSemaphore.acquire(MyApp.Sem, fn -> raise "boom" end)
+
+      # exit → {:error, reason}
+      {:error, :oops} =
+        WeightedSemaphore.acquire(MyApp.Sem, fn -> exit(:oops) end)
+
+  In all cases, permits are freed and the next queued caller proceeds.
+  """
+
+  @typedoc "A semaphore reference — a registered name, PID, or `{:via, ...}` tuple."
+  @type name :: GenServer.server()
+
+  @typedoc "The number of permits to acquire. Must be a positive integer not exceeding the semaphore's max."
+  @type weight :: pos_integer()
+
+  @doc """
+  Returns a child specification for starting under a supervisor.
+
+  ## Options
+
+    * `:name` (required) — the name to register the semaphore under
+    * `:max` (required) — the maximum total weight (number of permits)
+
+  ## Examples
+
+      # In your Application or Supervisor
+      children = [
+        {WeightedSemaphore, name: MyApp.Sem, max: 10},
+        {WeightedSemaphore, name: MyApp.ApiThrottle, max: 5}
+      ]
+
+      Supervisor.start_link(children, strategy: :one_for_one)
+  """
+  def child_spec(opts) do
+    name = Keyword.fetch!(opts, :name)
+
+    %{
+      id: {__MODULE__, name},
+      start: {WeightedSemaphore.Server, :start_link, [opts]},
+      type: :worker
+    }
+  end
+
+  @doc """
+  Starts a weighted semaphore linked to the current process.
+
+  Typically you'd use `child_spec/1` instead to start under a supervisor.
+  See `child_spec/1` for options.
+
+  ## Examples
+
+      {:ok, pid} = WeightedSemaphore.start_link(name: MyApp.Sem, max: 10)
+  """
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts) do
+    WeightedSemaphore.Server.start_link(opts)
+  end
+
+  @doc """
+  Acquires 1 permit, runs `fun`, and auto-releases the permit.
+
+  Blocks until a permit is available. The function runs in a separate
+  process — if it raises, exits, or throws, the error is returned and
+  permits are still released.
+
+  ## Examples
+
+      {:ok, user} = WeightedSemaphore.acquire(MyApp.Sem, fn ->
+        Repo.get!(User, 123)
+      end)
+
+      # If the function crashes, you get the error back
+      {:error, {%RuntimeError{}, _stacktrace}} =
+        WeightedSemaphore.acquire(MyApp.Sem, fn -> raise "boom" end)
+  """
+  @spec acquire(name(), (-> result)) :: {:ok, result} | {:error, term()} when result: term()
+  def acquire(sem, fun) when is_function(fun, 0) do
+    acquire(sem, 1, fun)
+  end
+
+  @doc """
+  Acquires `weight` permits, runs `fun`, and auto-releases the permits.
+
+  Blocks until enough permits are available. If `timeout` is given (in
+  milliseconds), returns `{:error, :timeout}` if permits aren't available
+  in time.
+
+  Returns `{:error, :weight_exceeds_max}` immediately if `weight` is larger
+  than the semaphore's total capacity.
+
+  ## Examples
+
+      # Acquire 5 permits for a heavy operation
+      {:ok, count} = WeightedSemaphore.acquire(MyApp.Sem, 5, fn ->
+        Repo.insert_all(Event, large_batch)
+      end)
+
+      # With a 5-second timeout
+      case WeightedSemaphore.acquire(MyApp.Sem, 5, fn -> slow_work() end, 5_000) do
+        {:ok, result} -> handle_result(result)
+        {:error, :timeout} -> handle_timeout()
+      end
+
+      # Weight too large — rejected immediately
+      {:error, :weight_exceeds_max} =
+        WeightedSemaphore.acquire(MyApp.Sem, 999, fn -> :never end)
+  """
+  @spec acquire(name(), weight(), (-> result)) :: {:ok, result} | {:error, term()}
+        when result: term()
+  @spec acquire(name(), weight(), (-> result), timeout()) ::
+          {:ok, result} | {:error, term()}
+        when result: term()
+  def acquire(sem, weight, fun, timeout \\ :infinity)
+      when is_integer(weight) and is_function(fun, 0) do
+    GenServer.call(sem, {:acquire, weight, fun}, timeout)
+  catch
+    :exit, {:timeout, _} -> {:error, :timeout}
+  end
+
+  @doc """
+  Tries to acquire 1 permit without blocking.
+
+  If a permit is available and no one is queued ahead, runs `fun` and
+  returns `{:ok, result}`. Otherwise returns `:rejected` immediately.
+
+  This is useful for "best effort" work that can be skipped when the
+  system is under load.
+
+  ## Examples
+
+      case WeightedSemaphore.try_acquire(MyApp.Sem, fn -> quick_check() end) do
+        {:ok, result} -> use_result(result)
+        :rejected -> fallback()
+      end
+  """
+  @spec try_acquire(name(), (-> result)) :: {:ok, result} | {:error, term()} | :rejected
+        when result: term()
+  def try_acquire(sem, fun) when is_function(fun, 0) do
+    try_acquire(sem, 1, fun)
+  end
+
+  @doc """
+  Tries to acquire `weight` permits without blocking.
+
+  If enough permits are available and no one is queued ahead, runs `fun`
+  and returns `{:ok, result}`. Otherwise returns `:rejected` immediately.
+
+  Note that `:rejected` is returned even if enough raw capacity exists
+  but there are waiters in the queue — this preserves FIFO fairness.
+
+  ## Examples
+
+      # Try to run a heavy operation, skip if system is busy
+      case WeightedSemaphore.try_acquire(MyApp.Sem, 5, fn -> process_batch(batch) end) do
+        {:ok, result} -> {:processed, result}
+        :rejected -> {:queued_for_later, batch}
+      end
+
+      # Weight exceeds max — still returns an error, not :rejected
+      {:error, :weight_exceeds_max} =
+        WeightedSemaphore.try_acquire(MyApp.Sem, 999, fn -> :never end)
+  """
+  @spec try_acquire(name(), weight(), (-> result)) ::
+          {:ok, result} | {:error, term()} | :rejected
+        when result: term()
+  def try_acquire(sem, weight, fun)
+      when is_integer(weight) and is_function(fun, 0) do
+    GenServer.call(sem, {:try_acquire, weight, fun})
+  end
+end
