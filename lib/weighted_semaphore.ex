@@ -92,6 +92,11 @@ defmodule WeightedSemaphore do
       ]
 
       Supervisor.start_link(children, strategy: :one_for_one)
+
+      iex> spec = WeightedSemaphore.child_spec(name: :my_sem, max: 10)
+      iex> spec.id
+      {WeightedSemaphore, :my_sem}
+
   """
   def child_spec(opts) do
     name = Keyword.fetch!(opts, :name)
@@ -127,13 +132,10 @@ defmodule WeightedSemaphore do
 
   ## Examples
 
-      {:ok, user} = WeightedSemaphore.acquire(MyApp.Sem, fn ->
-        Repo.get!(User, 123)
-      end)
+      iex> {:ok, _pid} = WeightedSemaphore.start_link(name: :acq1_sem, max: 3)
+      iex> WeightedSemaphore.acquire(:acq1_sem, fn -> 1 + 1 end)
+      {:ok, 2}
 
-      # If the function crashes, you get the error back
-      {:error, {%RuntimeError{}, _stacktrace}} =
-        WeightedSemaphore.acquire(MyApp.Sem, fn -> raise "boom" end)
   """
   @spec acquire(name(), (-> result)) :: {:ok, result} | {:error, term()} when result: term()
   def acquire(sem, fun) when is_function(fun, 0) do
@@ -152,20 +154,14 @@ defmodule WeightedSemaphore do
 
   ## Examples
 
-      # Acquire 5 permits for a heavy operation
-      {:ok, count} = WeightedSemaphore.acquire(MyApp.Sem, 5, fn ->
-        Repo.insert_all(Event, large_batch)
-      end)
+      iex> {:ok, _pid} = WeightedSemaphore.start_link(name: :acq3_sem, max: 10)
+      iex> WeightedSemaphore.acquire(:acq3_sem, 3, fn -> :done end)
+      {:ok, :done}
 
-      # With a 5-second timeout
-      case WeightedSemaphore.acquire(MyApp.Sem, 5, fn -> slow_work() end, 5_000) do
-        {:ok, result} -> handle_result(result)
-        {:error, :timeout} -> handle_timeout()
-      end
+      iex> {:ok, _pid} = WeightedSemaphore.start_link(name: :acq3_max_sem, max: 5)
+      iex> WeightedSemaphore.acquire(:acq3_max_sem, 6, fn -> :never end)
+      {:error, :weight_exceeds_max}
 
-      # Weight too large — rejected immediately
-      {:error, :weight_exceeds_max} =
-        WeightedSemaphore.acquire(MyApp.Sem, 999, fn -> :never end)
   """
   @spec acquire(name(), weight(), (-> result)) :: {:ok, result} | {:error, term()}
         when result: term()
@@ -190,10 +186,10 @@ defmodule WeightedSemaphore do
 
   ## Examples
 
-      case WeightedSemaphore.try_acquire(MyApp.Sem, fn -> quick_check() end) do
-        {:ok, result} -> use_result(result)
-        :rejected -> fallback()
-      end
+      iex> {:ok, _pid} = WeightedSemaphore.start_link(name: :try1_sem, max: 3)
+      iex> WeightedSemaphore.try_acquire(:try1_sem, fn -> :fast end)
+      {:ok, :fast}
+
   """
   @spec try_acquire(name(), (-> result)) :: {:ok, result} | {:error, term()} | :rejected
         when result: term()
@@ -212,15 +208,14 @@ defmodule WeightedSemaphore do
 
   ## Examples
 
-      # Try to run a heavy operation, skip if system is busy
-      case WeightedSemaphore.try_acquire(MyApp.Sem, 5, fn -> process_batch(batch) end) do
-        {:ok, result} -> {:processed, result}
-        :rejected -> {:queued_for_later, batch}
-      end
+      iex> {:ok, _pid} = WeightedSemaphore.start_link(name: :try3_sem, max: 5)
+      iex> WeightedSemaphore.try_acquire(:try3_sem, 2, fn -> :ok end)
+      {:ok, :ok}
 
-      # Weight exceeds max — still returns an error, not :rejected
-      {:error, :weight_exceeds_max} =
-        WeightedSemaphore.try_acquire(MyApp.Sem, 999, fn -> :never end)
+      iex> {:ok, _pid} = WeightedSemaphore.start_link(name: :try3_max_sem, max: 5)
+      iex> WeightedSemaphore.try_acquire(:try3_max_sem, 999, fn -> :never end)
+      {:error, :weight_exceeds_max}
+
   """
   @spec try_acquire(name(), weight(), (-> result)) ::
           {:ok, result} | {:error, term()} | :rejected

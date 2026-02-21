@@ -1,5 +1,6 @@
 defmodule WeightedSemaphoreTest do
   use ExUnit.Case, async: true
+  doctest WeightedSemaphore
 
   describe "basic acquire" do
     test "acquires weight 1 and returns result" do
