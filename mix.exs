@@ -2,7 +2,7 @@ defmodule WeightedSemaphore.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/probably-not/weighted_semaphore"
+  @source_url "https://github.com/yoavgeva/weighted_semaphore"
 
   def project do
     [
