@@ -1,5 +1,8 @@
 # WeightedSemaphore
 
+> **Deprecated** — This package has been merged into [`resiliency`](https://github.com/yoavgeva/resiliency).
+> Use `Resiliency.WeightedSemaphore` instead. This repo is archived and will not receive further updates.
+
 [![CI](https://github.com/yoavgeva/weighted_semaphore/actions/workflows/ci.yml/badge.svg)](https://github.com/yoavgeva/weighted_semaphore/actions/workflows/ci.yml)
 [![Hex.pm](https://img.shields.io/hexpm/v/weighted_semaphore.svg)](https://hex.pm/packages/weighted_semaphore)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/weighted_semaphore)
